@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "selection-client",
+  "version": "${version}",
+  "name": "Selection Client",
+  "description": "Client selection tools extracted from AI Helper.",
+  "authors": [
+    "liuzeen1234"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.selectionclient.SelectionClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "~1.20.4",
+    "java": ">=17",
+    "fabric-api": "*"
+  }
+}

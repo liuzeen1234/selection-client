@@ -1,0 +1,204 @@
+package com.example.selectionclient.selection;
+
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.text.Text;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 选区分析与导出界面：显示选区内方块统计信息，支持导出为蓝图文件。
+ */
+public class SelectionExportScreen extends Screen {
+
+    private final Screen parent;
+    private final SelectionAnalyzer.AnalysisResult result;
+
+    // 分页显示方块列表
+    private int scrollOffset = 0;
+    private List<Map.Entry<String, Integer>> blockList;
+
+    // 导出时是否包含实体（默认开）
+
+    // 被忽略（不记录）的方块种类 id 集合，导出时会被过滤掉
+    private final Set<String> ignoredBlocks = new HashSet<>();
+
+    // 列表渲染布局参数（render 与 mouseClicked 共享，保证命中检测与绘制一致）
+    private static final int LIST_TOTAL_W = 220;
+    private static final int ROW_HEIGHT = 11;
+    private static final int TOGGLE_W = 9;   // +/- 符号点击区域宽度
+    // 列表首行的 y（render 中计算：infoY(26) + 42 + 12）
+    private static final int LIST_FIRST_ROW_Y = 26 + 42 + 12;
+
+    public SelectionExportScreen(Screen parent, SelectionAnalyzer.AnalysisResult result) {
+        super(Text.literal(com.example.selectionclient.I18n.tr("selection.export.title")));
+        this.parent = parent;
+        this.result = result;
+        // 默认不保存空气方块：将 air/cave_air/void_air 预置为忽略。
+        // 它们仍以普通条目出现在方块列表中，用户可点 +/- 切换是否保存。
+        this.ignoredBlocks.add("air");
+        this.ignoredBlocks.add("cave_air");
+        this.ignoredBlocks.add("void_air");
+    }
+
+    @Override
+    protected void init() {
+        int cx = this.width / 2;
+        int totalW = 220;
+        int leftX = cx - totalW / 2;
+
+        // 方块统计列表：把三种空气（air/cave_air/void_air）排到最前，方便快速切换保存开关，
+        // 其余方块保持字母序（blockCounts 是 TreeMap，本身已按字母序）。
+        blockList = new ArrayList<>(result.blockCounts().entrySet());
+        blockList.sort(java.util.Comparator
+                .comparingInt((Map.Entry<String, Integer> e) -> airPriority(e.getKey()))
+                .thenComparing(Map.Entry::getKey));
+
+        // 导出选区按钮（点击后弹出导出菜单）
+        int exportBtnY = this.height - 80;
+        this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("selection.export.export_button")), button -> {
+            this.client.setScreen(new SelectionExportPopupScreen(this, result, new HashSet<>(ignoredBlocks)));
+        }).dimensions(leftX, exportBtnY, totalW, 20).build());
+
+        // 返回按钮
+        this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("button.back")), button -> {
+            this.client.setScreen(this.parent);
+        }).dimensions(cx - 50, this.height - 30, 100, 20).build());
+    }
+
+    @Override
+    public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+        this.renderBackground(context, mouseX, mouseY, delta);
+        int cx = this.width / 2;
+        int totalW = 220;
+        int leftX = cx - totalW / 2;
+
+        // 标题
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, cx, 10, 0xFFFFFF);
+
+        // 基本信息
+        int infoY = 26;
+        context.drawTextWithShadow(this.textRenderer,
+                com.example.selectionclient.I18n.tr("selection.export.size", result.sizeX(), result.sizeY(), result.sizeZ()),
+                leftX, infoY, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer,
+                com.example.selectionclient.I18n.tr("selection.export.counts",
+                        result.totalBlocks(), result.airBlocks(),
+                        result.totalBlocks() - result.airBlocks()),
+                leftX, infoY + 12, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer,
+                com.example.selectionclient.I18n.tr("selection.export.types", result.blockCounts().size()),
+                leftX, infoY + 24, 0xAAAAAA);
+        // 忽略提示：只统计"选区里实际存在"的被忽略种类数。
+        // ignoredBlocks 预置了 air/cave_air/void_air，但选区里未必都有，
+        // 故与实际方块种类求交集，避免显示不存在的种类。
+        int ignoredPresent = 0;
+        for (String id : ignoredBlocks) {
+            if (result.blockCounts().containsKey(id)) ignoredPresent++;
+        }
+        if (ignoredPresent > 0) {
+            context.drawTextWithShadow(this.textRenderer,
+                    com.example.selectionclient.I18n.tr("selection.export.ignored_count", ignoredPresent),
+                    leftX + 120, infoY + 24, 0xFF7777);
+        }
+
+        // 方块列表
+        int listY = infoY + 42;
+        int listMaxY = this.height - 88; // 导出按钮上方留出空间
+        context.drawTextWithShadow(this.textRenderer, com.example.selectionclient.I18n.tr("selection.export.block_stats"), leftX, listY, 0xFFFF55);
+        listY += 12;
+
+        // +/- 切换符号所在的 x（行右侧）
+        int toggleX = leftX + totalW - TOGGLE_W;
+
+        int maxVisible = Math.max(1, (listMaxY - listY) / ROW_HEIGHT);
+        int end = Math.min(scrollOffset + maxVisible, blockList.size());
+        for (int i = scrollOffset; i < end; i++) {
+            if (listY + ROW_HEIGHT > listMaxY) break;
+            Map.Entry<String, Integer> entry = blockList.get(i);
+            String blockId = entry.getKey();
+            boolean ignored = ignoredBlocks.contains(blockId);
+            int textColor = ignored ? 0x888888 : 0xDDDDDD;
+
+            // 计数 "x<数量>" 右对齐，紧贴 +/- 符号左侧，完整显示不截断
+            String countStr = "x" + entry.getValue();
+            int countW = this.textRenderer.getWidth(countStr);
+            int countX = toggleX - 6 - countW;
+            context.drawTextWithShadow(this.textRenderer, countStr, countX, listY, textColor);
+
+            // 方块 id 左对齐，按像素宽度截断，避免和计数重叠
+            int idMaxW = countX - 4 - leftX;
+            String idText = this.textRenderer.trimToWidth(blockId, idMaxW);
+            context.drawTextWithShadow(this.textRenderer, idText, leftX, listY, textColor);
+
+            // 右侧切换符号：会被记录 -> 红色减号（按下后不记录）；已忽略 -> 绿色加号
+            String symbol = ignored ? "+" : "-";
+            int symbolColor = ignored ? 0x55FF55 : 0xFF5555;
+            context.drawTextWithShadow(this.textRenderer, symbol, toggleX, listY, symbolColor);
+
+            listY += ROW_HEIGHT;
+        }
+
+        super.render(context, mouseX, mouseY, delta);
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (button == 0 && blockList != null) {
+            int cx = this.width / 2;
+            int leftX = cx - LIST_TOTAL_W / 2;
+            int toggleX = leftX + LIST_TOTAL_W - TOGGLE_W;
+            int listMaxY = this.height - 88;
+
+            // 命中检测：判断点击落在哪一可见行的右侧符号区域
+            if (mouseX >= toggleX && mouseX <= toggleX + TOGGLE_W) {
+                int maxVisible = Math.max(1, (listMaxY - LIST_FIRST_ROW_Y) / ROW_HEIGHT);
+                int end = Math.min(scrollOffset + maxVisible, blockList.size());
+                for (int i = scrollOffset; i < end; i++) {
+                    int rowY = LIST_FIRST_ROW_Y + (i - scrollOffset) * ROW_HEIGHT;
+                    if (rowY + ROW_HEIGHT > listMaxY) break;
+                    if (mouseY >= rowY && mouseY < rowY + ROW_HEIGHT) {
+                        String blockId = blockList.get(i).getKey();
+                        if (!ignoredBlocks.remove(blockId)) {
+                            ignoredBlocks.add(blockId);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        int maxScroll = Math.max(0, blockList.size() - 1);
+        if (verticalAmount > 0) {
+            scrollOffset = Math.max(0, scrollOffset - 1);
+        } else if (verticalAmount < 0) {
+            scrollOffset = Math.min(maxScroll, scrollOffset + 1);
+        }
+        return true;
+    }
+
+    /**
+     * 方块统计列表的排序优先级：三种空气排最前（返回 0），其余方块排后（返回 1）。
+     * 同优先级内再按方块 id 字母序排列。
+     */
+    private static int airPriority(String blockId) {
+        return switch (blockId) {
+            case "air", "cave_air", "void_air" -> 0;
+            default -> 1;
+        };
+    }
+
+    @Override
+    public void close() {
+        this.client.setScreen(this.parent);
+    }
+}
