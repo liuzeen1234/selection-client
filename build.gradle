@@ -1,25 +1,56 @@
 plugins {
-    id "fabric-loom" version "1.5-SNAPSHOT"
+    id "net.fabricmc.fabric-loom-remap" version "1.17.21" apply false
+    id "net.fabricmc.fabric-loom" version "1.17.21" apply false
     id "maven-publish"
 }
 
+// Like debug_menu, each Minecraft target gets its own dependencies and jar.
+ext.supportedVersions = [
+    '1.20.4': [loader: '0.15.11', api: '0.95.4+1.20.4', java: 17],
+    '26.2': [loader: '0.19.3', api: '0.161.0+26.2', java: 25]
+]
+def mcTarget = (findProperty('mc') ?: property('default_mc')).toString()
+def target = supportedVersions[mcTarget]
+if (target == null) {
+    throw new GradleException("Unsupported Minecraft target ${mcTarget}. Supported: ${supportedVersions.keySet().join(', ')}")
+}
+def modern = mcTarget == '26.2'
+apply plugin: modern ? 'net.fabricmc.fabric-loom' : 'net.fabricmc.fabric-loom-remap'
+logger.lifecycle("[selection-client] building for Minecraft ${mcTarget}")
 version = project.mod_version
 group = project.maven_group
-
-base {
-    archivesName = project.archives_base_name
-}
+base { archivesName = "${project.archives_base_name}-mc${mcTarget}" }
+layout.buildDirectory = file("build/targets/${mcTarget}")
+sourceSets.main.java.setSrcDirs(modern ? ['src/mc26.2/java'] : ['src/main/java'])
+sourceSets.test.java.setSrcDirs(modern ? ['src/mc26.2/test'] : ['src/test/java'])
 
 repositories {
+    // Mojang libraries are enumerated by the game manifest, including their dependencies.
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "MojangTarget"
+                url = "https://libraries.minecraft.net/"
+                metadataSources { artifact() }
+            }
+        }
+        filter { includeGroup 'com.mojang' }
+    }
+    exclusiveContent {
+        forRepository {
+            maven { name = "FabricTarget"; url = "https://maven.fabricmc.net/" }
+        }
+        filter { includeGroupByRegex 'net\\.fabricmc(\\..*)?' }
+    }
     maven { url "https://maven.aliyun.com/repository/central" }
     mavenCentral()
 }
 
 dependencies {
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    minecraft "com.mojang:minecraft:${mcTarget}"
+    if (!modern) mappings "net.fabricmc:yarn:1.20.4+build.3:v2"
+    add(modern ? "implementation" : "modImplementation", "net.fabricmc:fabric-loader:${target.loader}")
+    add(modern ? "implementation" : "modImplementation", "net.fabricmc.fabric-api:fabric-api:${target.api}")
 
     // 测试依赖
     testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
@@ -28,14 +59,19 @@ dependencies {
 }
 
 processResources {
-    inputs.property "version", project.version
+    inputs.property "version", "${project.version}+mc${mcTarget}"
+    inputs.property "minecraft_dependency", "~${mcTarget}"
+    inputs.property "loader_dependency", ">=${target.loader}"
+    inputs.property "java_dependency", ">=${target.java}"
     filesMatching("fabric.mod.json") {
-        expand "version": project.version
+        expand version: "${project.version}+mc${mcTarget}",
+                minecraft_dependency: "~${mcTarget}",
+                loader_dependency: ">=${target.loader}", java_dependency: ">=${target.java}"
     }
 }
 
 tasks.withType(JavaCompile).configureEach {
-    it.options.release = 17
+    it.options.release = target.java
     it.options.encoding = "UTF-8"
 }
 
@@ -43,6 +79,7 @@ tasks.withType(JavaCompile).configureEach {
 loom {
     runs {
         client {
+            runDir "run/${mcTarget}"
             vmArgs "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
         }
     }
@@ -50,17 +87,26 @@ loom {
 
 test {
     useJUnitPlatform()
+    // Minecraft's logging must stay in the ignored build directory during tests.
+    workingDir = layout.buildDirectory.dir('test-runtime').get().asFile
+    doFirst { workingDir.mkdirs() }
 }
 
 java {
-    // 固定编译 / 测试 / 运行（含 runClient 游戏本体）所用的 JDK 为 17。
-    // Gradle 会按此 toolchain 自动定位本机的 JDK 17；找不到时可由 gradle.properties 中的
-    // org.gradle.java.home 兜底（该项同时也决定 Gradle 守护进程本身用哪个 JDK）。
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(target.java)
     }
     withSourcesJar()
 }
 
 
 
+
+// Collect installable jars without overwriting the other target.
+if (modern) {
+    tasks.named('jar', Jar) { destinationDirectory = file('build/libs') }
+    tasks.named('sourcesJar', Jar) { destinationDirectory = file('build/libs') }
+} else {
+    tasks.named('remapJar') { destinationDirectory = file('build/libs') }
+    tasks.named('remapSourcesJar') { destinationDirectory = file('build/libs') }
+}

@@ -44,7 +44,10 @@
   "selection.memory.info": "Total %s  (%s-%s)",
   "key.selection-client.open": "Open selection tool",
   "key.categories.selection-client": "Selection Client",
+  "selection.structures.open": "Structure file manager",
+  "selection.structures.open_failed": "§c[Selection] Could not open structure directory: %s",
   "selection.memory.open": "Selection history",
   "export.nbt.exported": "§a[Selection] NBT exported: %s",
-  "export.nbt.export_failed": "§c[Selection] Export failed: %s"
+  "export.nbt.export_failed": "§c[Selection] Export failed: %s",
+  "key.category.selection-client.selection": "Selection Client"
 }

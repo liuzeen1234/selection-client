@@ -1,0 +1,443 @@
+package com.example.selectionclient.selection;
+
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.IntTag;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.core.BlockPos;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.*;
+
+/**
+ * 分析选区内所有方块的种类、状态和相对位置，
+ * 并可导出为兼容 BlueprintParser 的蓝图文本格式。
+ */
+public class SelectionAnalyzer {
+
+    /** 分析结果中的单个方块信息 */
+    public record BlockInfo(String blockId, Map<String, String> properties, int relX, int relY, int relZ) {}
+
+    /** 完整的分析结果 */
+    public record AnalysisResult(
+            BlockPos min, BlockPos max,
+            int sizeX, int sizeY, int sizeZ,
+            int totalBlocks, int airBlocks,
+            Map<String, Integer> blockCounts,
+            List<BlockInfo> blocks
+    ) {}
+
+    /**
+     * 扫描选区内所有方块，返回分析结果。
+     */
+    public static AnalysisResult analyze(BlockPos pos1, BlockPos pos2) {
+        ClientLevel world = Minecraft.getInstance().level;
+        if (world == null) return null;
+
+        BlockPos min = new BlockPos(
+                Math.min(pos1.getX(), pos2.getX()),
+                Math.min(pos1.getY(), pos2.getY()),
+                Math.min(pos1.getZ(), pos2.getZ()));
+        BlockPos max = new BlockPos(
+                Math.max(pos1.getX(), pos2.getX()),
+                Math.max(pos1.getY(), pos2.getY()),
+                Math.max(pos1.getZ(), pos2.getZ()));
+
+        int sizeX = max.getX() - min.getX() + 1;
+        int sizeY = max.getY() - min.getY() + 1;
+        int sizeZ = max.getZ() - min.getZ() + 1;
+
+        Map<String, Integer> blockCounts = new TreeMap<>();
+        List<BlockInfo> blocks = new ArrayList<>();
+        int airBlocks = 0;
+        int totalBlocks = 0;
+
+        for (int y = min.getY(); y <= max.getY(); y++) {
+            for (int z = min.getZ(); z <= max.getZ(); z++) {
+                for (int x = min.getX(); x <= max.getX(); x++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    BlockState state = world.getBlockState(pos);
+                    totalBlocks++;
+
+                    // 空气方块（air/cave_air/void_air）不再被跳过：像普通方块一样
+                    // 各自按真实 id 统计并加入 blocks 列表，用户可在导出界面用 +/- 选择是否保存。
+                    // airBlocks 仍单独累加三种空气总数，供界面统计行展示。
+                    if (state.isAir()) {
+                        airBlocks++;
+                    }
+
+                    String blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString().replaceFirst("^minecraft:", "");
+                    Map<String, String> props = new LinkedHashMap<>();
+                    for (Property<?> prop : state.getProperties()) {
+                        props.put(prop.getName(), getPropertyValueString(state, prop));
+                    }
+
+                    blockCounts.merge(blockId, 1, Integer::sum);
+                    blocks.add(new BlockInfo(blockId, props,
+                            x - min.getX(), y - min.getY(), z - min.getZ()));
+                }
+            }
+        }
+
+        return new AnalysisResult(min, max, sizeX, sizeY, sizeZ,
+                totalBlocks, airBlocks, blockCounts, blocks);
+    }
+
+    /** 应用导出页面的忽略设置，保留原选区尺寸和相对坐标。 */
+    public static AnalysisResult filterBlocks(AnalysisResult result, Set<String> ignoredBlocks) {
+        List<BlockInfo> blocks = new ArrayList<>();
+        Map<String, Integer> counts = new TreeMap<>();
+        int air = 0;
+        for (BlockInfo block : result.blocks()) {
+            if (ignoredBlocks.contains(block.blockId()) || ignoredBlocks.contains(block.blockId().replace("minecraft:", ""))) continue;
+            blocks.add(block);
+            counts.merge(block.blockId(), 1, Integer::sum);
+            if (Set.of("air", "cave_air", "void_air").contains(block.blockId())) air++;
+        }
+        return new AnalysisResult(result.min(), result.max(), result.sizeX(), result.sizeY(), result.sizeZ(),
+                blocks.size(), air, counts, blocks);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable<T>> String getPropertyValueString(BlockState state, Property<T> prop) {
+        return prop.getName(state.getValue(prop));
+    }
+
+    /**
+     * 将分析结果导出为 V2 格式蓝图文本（MCBLUEPRINT v2）。
+     *
+     * 格式特点：
+     *   - 每个方块一行，格式：x,y,z   block_id   [key=value ...]
+     *   - 坐标显式指定，无字符数量限制
+     *   - 所有 block state 属性完整保留（facing、waterlogged、powered 等）
+     *   - 空气方块省略不写
+     *   - 支持行内注释（# 开头）
+     */
+    public static String exportBlueprintV2(AnalysisResult result, String name) {
+        if (result == null || result.blocks.isEmpty()) return "";
+
+        StringBuilder sb = new StringBuilder();
+
+        // 文件头
+        sb.append("# MCBLUEPRINT v2\n");
+        sb.append("# name: ").append(name).append("\n");
+        sb.append("# size: ").append(result.sizeX).append("x")
+          .append(result.sizeY).append("x").append(result.sizeZ).append("\n");
+        sb.append("# origin: 0,0,0\n");
+        sb.append("# 坐标原点在结构西北角最低层，x向东，y向上，z向南\n");
+        sb.append("# 格式：x,y,z  block_id  [key=value ...]\n");
+        sb.append("\n");
+        sb.append("## BLOCKS\n");
+        sb.append("\n");
+
+        // 按 y 层分组输出，便于阅读
+        // 先按 y 分组
+        Map<Integer, List<BlockInfo>> byLayer = new TreeMap<>();
+        for (BlockInfo block : result.blocks) {
+            byLayer.computeIfAbsent(block.relY(), k -> new ArrayList<>()).add(block);
+        }
+
+        for (Map.Entry<Integer, List<BlockInfo>> layerEntry : byLayer.entrySet()) {
+            int y = layerEntry.getKey();
+            sb.append("# --- 第 ").append(y + 1).append(" 层 (y=").append(y).append(") ---\n");
+
+            // 层内按 z 再按 x 排序
+            List<BlockInfo> layerBlocks = layerEntry.getValue();
+            layerBlocks.sort(Comparator.comparingInt(BlockInfo::relZ)
+                    .thenComparingInt(BlockInfo::relX));
+
+            for (BlockInfo block : layerBlocks) {
+                sb.append(block.relX()).append(",")
+                  .append(block.relY()).append(",")
+                  .append(block.relZ()).append("   ")
+                  .append(block.blockId());
+
+                // 输出所有属性
+                if (!block.properties().isEmpty()) {
+                    for (Map.Entry<String, String> prop : block.properties().entrySet()) {
+                        sb.append("   ").append(prop.getKey()).append("=").append(prop.getValue());
+                    }
+                }
+                sb.append("\n");
+            }
+            sb.append("\n");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * 将分析结果导出为兼容 BlueprintParser 的蓝图文本（V1 旧格式）。
+     * 格式与 txts/ 下的 .txt 文件一致。
+     * @deprecated 建议使用 {@link #exportBlueprintV2} 以获得完整的方块状态支持。
+     */
+    @Deprecated
+    public static String exportBlueprint(AnalysisResult result, String name) {
+        if (result == null || result.blocks.isEmpty()) return "";
+
+        // 为每种独特的 blockId+properties 组合分配一个符号字符
+        Map<String, Character> legendMap = new LinkedHashMap<>();
+        Map<String, String> legendDefinitions = new LinkedHashMap<>();
+        char nextSymbol = 'A';
+
+        // 构建 3D 网格: [y][z][x]
+        char[][][] grid = new char[result.sizeY][result.sizeZ][result.sizeX];
+        for (char[][] layer : grid)
+            for (char[] row : layer)
+                Arrays.fill(row, ' ');
+
+        for (BlockInfo block : result.blocks) {
+            String key = buildLegendKey(block.blockId, block.properties);
+            if (!legendMap.containsKey(key)) {
+                char symbol = nextSymbol;
+                // 跳过空格和管道符等特殊字符
+                while (symbol == ' ' || symbol == '|' || symbol == '=' || symbol == '{' || symbol == '}') {
+                    symbol++;
+                }
+                nextSymbol = (char) (symbol + 1);
+                // 如果大写字母用完，切换到小写
+                if (nextSymbol > 'Z' && nextSymbol < 'a') nextSymbol = 'a';
+                // 如果小写也用完，用数字
+                if (nextSymbol > 'z' && nextSymbol < '0') nextSymbol = '0';
+
+                legendMap.put(key, symbol);
+                legendDefinitions.put(key, buildLegendDefinition(block.blockId, block.properties));
+            }
+            grid[block.relY][block.relZ][block.relX] = legendMap.get(key);
+        }
+
+        // 生成蓝图文本
+        StringBuilder sb = new StringBuilder();
+        sb.append("==== 平面结构图 ====\n");
+        sb.append("{{layered blueprint|name=\n");
+        sb.append(name).append("|default=第1层\n");
+
+        // 图例
+        for (Map.Entry<String, Character> entry : legendMap.entrySet()) {
+            sb.append("|").append(entry.getValue()).append("=")
+              .append(legendDefinitions.get(entry.getKey())).append("\n");
+        }
+
+        // 各层
+        for (int y = 0; y < result.sizeY; y++) {
+            sb.append("\n|----第").append(y + 1).append("层|\n\n");
+            for (int z = 0; z < result.sizeZ; z++) {
+                sb.append(new String(grid[y][z]));
+                // 去掉行尾空格
+                int len = sb.length();
+                while (len > 0 && sb.charAt(len - 1) == ' ') len--;
+                sb.setLength(len);
+                sb.append("\n");
+            }
+        }
+
+        sb.append("\n}}\n");
+        return sb.toString();
+    }
+
+    /**
+     * 构建图例的唯一键（blockId + 所有有意义的属性）
+     */
+    private static String buildLegendKey(String blockId, Map<String, String> properties) {
+        if (properties.isEmpty()) return blockId;
+        StringBuilder sb = new StringBuilder(blockId);
+        for (Map.Entry<String, String> e : properties.entrySet()) {
+            // 跳过一些不影响外观的属性
+            if (shouldSkipProperty(e.getKey())) continue;
+            sb.append("|").append(e.getKey()).append("=").append(e.getValue());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 构建图例定义字符串，兼容 BlueprintParser 的格式。
+     */
+    private static String buildLegendDefinition(String blockId, Map<String, String> properties) {
+        String displayName = blockIdToDisplayName(blockId);
+        StringBuilder sb = new StringBuilder(displayName);
+
+        // 处理 facing → -rot 转换
+        String facing = properties.get("facing");
+        if (facing != null) {
+            int rot = facingToRot(facing);
+            if (isWallMounted(blockId)) {
+                sb.append("-rot-").append(rot);
+            } else {
+                sb.append("-rot").append(rot);
+            }
+        }
+
+        // 处理 half 属性
+        String half = properties.get("half");
+        if (half != null) {
+            // 门用 bottom/top 表示 lower/upper
+            if (blockId.endsWith("_door")) {
+                String mapped = half.equals("lower") ? "bottom" : "top";
+                sb.append("+").append(mapped);
+            } else {
+                sb.append("+").append(half);
+            }
+        }
+
+        // 处理 part 属性（床）
+        String part = properties.get("part");
+        if (part != null) {
+            if (half != null) {
+                sb.append(" ").append(part);
+            } else {
+                sb.append("+").append(part);
+            }
+        }
+
+        // 处理 axis 属性（原木）
+        String axis = properties.get("axis");
+        if (axis != null && (blockId.contains("_log") || blockId.contains("_wood"))) {
+            String axisName = switch (axis) {
+                case "x" -> "east";
+                case "z" -> "north";
+                default -> "top";
+            };
+            sb.append("+").append(axisName);
+        }
+
+        return sb.toString();
+    }
+
+    private static boolean shouldSkipProperty(String propName) {
+        // 跳过不影响蓝图还原的属性
+        return switch (propName) {
+            case "waterlogged", "powered", "lit", "open",
+                 "in_wall", "extended", "short", "locked",
+                 "has_bottle_0", "has_bottle_1", "has_bottle_2",
+                 "signal_fire", "age", "level", "moisture",
+                 "snowy", "persistent", "distance", "charges" -> true;
+            default -> false;
+        };
+    }
+
+    private static int facingToRot(String facing) {
+        return switch (facing) {
+            case "south" -> 0;
+            case "west" -> 90;
+            case "north" -> 180;
+            case "east" -> 270;
+            default -> 0;
+        };
+    }
+
+    private static boolean isWallMounted(String blockId) {
+        return blockId.equals("wall_torch") || blockId.equals("soul_wall_torch")
+                || blockId.equals("redstone_wall_torch");
+    }
+
+    /**
+     * 方块ID转显示名称: smooth_sandstone_stairs → Smooth Sandstone Stairs
+     */
+    private static String blockIdToDisplayName(String blockId) {
+        String[] parts = blockId.split("_");
+        StringBuilder sb = new StringBuilder();
+        for (String part : parts) {
+            if (!sb.isEmpty()) sb.append(" ");
+            sb.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 将分析结果导出为 Minecraft 原版 NBT 结构文件（.nbt）。
+     * 格式与结构方块保存的文件一致，仅保存方块和状态，不包含方块实体数据或实体。
+     *
+     * @param result 分析结果
+     * @param file   目标文件
+     * @throws IOException 写入失败时抛出
+     */
+    public static void exportNbt(AnalysisResult result, File file) throws IOException {
+        CompoundTag root = new CompoundTag();
+
+        // 使用当前游戏的数据版本，供原版结构读取与数据升级。
+        root.putInt("DataVersion", net.minecraft.SharedConstants.getCurrentVersion().dataVersion().version());
+
+        // size
+        ListTag sizeList = new ListTag();
+        sizeList.add(IntTag.valueOf(result.sizeX));
+        sizeList.add(IntTag.valueOf(result.sizeY));
+        sizeList.add(IntTag.valueOf(result.sizeZ));
+        root.put("size", sizeList);
+
+        // 构建调色板：为每种 blockId+properties 组合分配索引
+        Map<String, Integer> paletteIndexMap = new LinkedHashMap<>();
+        ListTag paletteList = new ListTag();
+
+        // 先加入空气（索引 0），用于填充空位
+        CompoundTag airEntry = new CompoundTag();
+        airEntry.putString("Name", "minecraft:air");
+        paletteList.add(airEntry);
+        paletteIndexMap.put("minecraft:air", 0);
+
+        for (BlockInfo block : result.blocks) {
+            String fullId = block.blockId().contains(":") ? block.blockId() : "minecraft:" + block.blockId();
+            String key = buildPaletteKey(fullId, block.properties());
+            if (!paletteIndexMap.containsKey(key)) {
+                int idx = paletteList.size();
+                paletteIndexMap.put(key, idx);
+
+                CompoundTag pe = new CompoundTag();
+                pe.putString("Name", fullId);
+                if (!block.properties().isEmpty()) {
+                    CompoundTag props = new CompoundTag();
+                    for (Map.Entry<String, String> e : block.properties().entrySet()) {
+                        props.putString(e.getKey(), e.getValue());
+                    }
+                    pe.put("Properties", props);
+                }
+                paletteList.add(pe);
+            }
+        }
+        root.put("palette", paletteList);
+
+        // blocks
+        ListTag blocksList = new ListTag();
+        for (BlockInfo block : result.blocks) {
+            String fullId = block.blockId().contains(":") ? block.blockId() : "minecraft:" + block.blockId();
+            String key = buildPaletteKey(fullId, block.properties());
+            int stateIdx = paletteIndexMap.get(key);
+
+            CompoundTag blockNbt = new CompoundTag();
+            ListTag pos = new ListTag();
+            pos.add(IntTag.valueOf(block.relX()));
+            pos.add(IntTag.valueOf(block.relY()));
+            pos.add(IntTag.valueOf(block.relZ()));
+            blockNbt.put("pos", pos);
+            blockNbt.putInt("state", stateIdx);
+            blocksList.add(blockNbt);
+        }
+        root.put("blocks", blocksList);
+
+        // entities（空列表）
+        root.put("entities", new ListTag());
+
+        // 写入压缩 NBT 文件
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            NbtIo.writeCompressed(root, fos);
+        }
+    }
+
+    /**
+     * 构建调色板的唯一键（包含所有属性）
+     */
+    private static String buildPaletteKey(String fullBlockId, Map<String, String> properties) {
+        if (properties.isEmpty()) return fullBlockId;
+        StringBuilder sb = new StringBuilder(fullBlockId);
+        for (Map.Entry<String, String> e : properties.entrySet()) {
+            sb.append("|").append(e.getKey()).append("=").append(e.getValue());
+        }
+        return sb.toString();
+    }
+}

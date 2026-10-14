@@ -6,6 +6,11 @@ import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.Util;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * 选区工具界面：输入两个坐标，确认后高亮。
@@ -32,7 +37,7 @@ public class SelectionScreen extends Screen {
         SelectionManager mgr = SelectionManager.getInstance();
 
         // --- 坐标 1 ---
-        int fieldY1 = 60;
+        int fieldY1 = coordinatesY();
         x1Field = new TextFieldWidget(this.textRenderer, leftX, fieldY1, fieldW, 18, Text.literal("X1"));
         y1Field = new TextFieldWidget(this.textRenderer, leftX + fieldW + gap, fieldY1, fieldW, 18, Text.literal("Y1"));
         z1Field = new TextFieldWidget(this.textRenderer, leftX + (fieldW + gap) * 2, fieldY1, fieldW, 18, Text.literal("Z1"));
@@ -107,12 +112,30 @@ public class SelectionScreen extends Screen {
         this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("selection.analyze")), button -> analyzeAndExport())
                 .dimensions(cx - totalW / 2, analyzeBtnY, totalW, 20).build());
 
-        this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("selection.memory.open")),
-                button -> { saveDraft(); this.client.setScreen(new SelectionMemoryScreen(this)); })
+        this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("selection.structures.open")),
+                button -> openStructuresDirectory())
                 .dimensions(cx - totalW / 2, analyzeBtnY + 24, totalW, 20).build());
         // --- 返回 ---
         this.addDrawableChild(ButtonWidget.builder(Text.literal(com.example.selectionclient.I18n.tr("button.back")), button -> goBack())
                 .dimensions(cx - 50, analyzeBtnY + 52, 100, 20).build());
+    }
+
+    private void openStructuresDirectory() {
+        saveDraft();
+        Path directory = com.example.selectionclient.ModPaths.getStructuresDir();
+        try {
+            Files.createDirectories(directory);
+            Util.getOperatingSystem().open(directory.toFile());
+        } catch (IOException | RuntimeException e) {
+            com.example.selectionclient.SelectionClient.LOGGER.error("无法打开结构文件目录: {}", directory, e);
+            if (this.client != null && this.client.player != null) {
+                this.client.player.sendMessage(Text.literal(com.example.selectionclient.I18n.tr("selection.structures.open_failed", directory)), false);
+            }
+        }
+    }
+
+    private int coordinatesY() {
+        return Math.min(60, Math.max(40, this.height - 204));
     }
 
     /** 退出前保存草稿 */
@@ -160,6 +183,8 @@ public class SelectionScreen extends Screen {
             mgr.setPos1(new BlockPos(x1, y1, z1));
             mgr.setPos2(new BlockPos(x2, y2, z2));
             mgr.clearDraft();
+            SelectionMemory.addEntry(x1 + "," + y1 + "," + z1 + " → " + x2 + "," + y2 + "," + z2,
+                    mgr.getPos1(), mgr.getPos2());
 
             if (this.client != null && this.client.player != null) {
                 this.client.player.sendMessage(
@@ -191,6 +216,8 @@ public class SelectionScreen extends Screen {
             mgr.setPos1(new BlockPos(x1, y1, z1));
             mgr.setPos2(new BlockPos(x2, y2, z2));
             mgr.clearDraft();
+            SelectionMemory.addEntry(x1 + "," + y1 + "," + z1 + " → " + x2 + "," + y2 + "," + z2,
+                    mgr.getPos1(), mgr.getPos2());
 
             if (this.client != null && this.client.player != null) {
                 this.client.player.sendMessage(
@@ -210,9 +237,10 @@ public class SelectionScreen extends Screen {
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         this.renderBackground(context, mouseX, mouseY, delta);
         int cx = this.width / 2;
-        context.drawCenteredTextWithShadow(this.textRenderer, this.title, cx, 34, 0xFFFFFF);
-        context.drawTextWithShadow(this.textRenderer, com.example.selectionclient.I18n.tr("selection.pos1.label"), cx - 84, 48, 0xAAAAAA);
-        context.drawTextWithShadow(this.textRenderer, com.example.selectionclient.I18n.tr("selection.pos2.label"), cx - 84, 48 + 36, 0xAAAAAA);
+        int fieldY1 = coordinatesY();
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, cx, fieldY1 - 26, 0xFFFFFF);
+        context.drawTextWithShadow(this.textRenderer, com.example.selectionclient.I18n.tr("selection.pos1.label"), cx - 84, fieldY1 - 12, 0xAAAAAA);
+        context.drawTextWithShadow(this.textRenderer, com.example.selectionclient.I18n.tr("selection.pos2.label"), cx - 84, fieldY1 + 24, 0xAAAAAA);
         super.render(context, mouseX, mouseY, delta);
     }
 

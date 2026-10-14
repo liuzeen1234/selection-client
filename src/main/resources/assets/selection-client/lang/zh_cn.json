@@ -44,7 +44,10 @@
   "selection.memory.info": "共 %s 条  (第 %s-%s 条)",
   "key.selection-client.open": "打开选区工具",
   "key.categories.selection-client": "选区工具",
+  "selection.structures.open": "结构文件管理",
+  "selection.structures.open_failed": "§c[选区] 无法打开结构文件目录：%s",
   "selection.memory.open": "选区历史",
   "export.nbt.exported": "§a[选区] NBT 已导出：%s",
-  "export.nbt.export_failed": "§c[选区] 导出失败：%s"
+  "export.nbt.export_failed": "§c[选区] 导出失败：%s",
+  "key.category.selection-client.selection": "选区工具"
 }
